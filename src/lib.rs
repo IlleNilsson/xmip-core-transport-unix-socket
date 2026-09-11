@@ -23,15 +23,18 @@
 //! send target is a path, or `unix://` and a path.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use transport::error::{Result, TransportError};
+use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::{Arrived, Directions, Transport};
 
 /// The listening end, on a system that has one.
 #[cfg(unix)]
 pub type Listener = std::os::unix::net::UnixListener;
 
+#[derive(Clone)]
 pub struct UnixSocketTransport {
     path: PathBuf,
     timeout: Option<Duration>,
@@ -170,6 +173,97 @@ impl Transport for UnixSocketTransport {
     }
 }
 
+impl UnixSocketTransport {
+    /// Both ends on this machine: a socket of this process's own in the
+    /// temporary directory, the loopback timeout on the read. Each far end
+    /// binds a fresh path, so rounds driven at once from several threads do
+    /// not take each other's Stream; the address is the socket's path. On a
+    /// system without the object the far end refuses, as the transport does.
+    #[must_use]
+    pub fn loopback() -> Self {
+        Self::new(fresh_path()).timing_out_after(LOOPBACK_TIMEOUT)
+    }
+}
+
+/// A socket path no other far end of this process has: the socket is the
+/// address, so two rounds at once need two sockets.
+fn fresh_path() -> PathBuf {
+    static COUNTER: AtomicU32 = AtomicU32::new(1);
+    std::env::temp_dir().join(format!(
+        "xmip-loopback-{}-{}.sock",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// A bound socket waiting for its one connection; the file goes with it.
+#[cfg(unix)]
+struct Bound {
+    transport: UnixSocketTransport,
+    listener: Listener,
+    address: String,
+}
+
+#[cfg(unix)]
+impl FarEnd for Bound {
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn take_one(self: Box<Self>) -> Result<Arrived> {
+        self.transport.accept_one(&self.listener)
+    }
+}
+
+/// The socket file goes with the far end, taken or not.
+#[cfg(unix)]
+impl Drop for Bound {
+    fn drop(&mut self) {
+        std::fs::remove_file(self.transport.path()).ok();
+    }
+}
+
+impl Loopback for UnixSocketTransport {
+    /// Where the OS has no Unix sockets, neither end can stand.
+    fn unavailable(&self) -> Option<String> {
+        unsupported().map(|error| error.message)
+    }
+
+    fn far_end(&self) -> Result<Box<dyn FarEnd>> {
+        #[cfg(unix)]
+        {
+            let mut transport = self.clone();
+            transport.path = fresh_path();
+            let listener = transport.bind()?;
+            let address = transport.path().display().to_string();
+            Ok(Box::new(Bound {
+                transport,
+                listener,
+                address,
+            }))
+        }
+        #[cfg(not(unix))]
+        {
+            Err(unsupported().unwrap_or_else(|| TransportError::permanent("unreachable")))
+        }
+    }
+
+    fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
+        Self::new(address).send(address, payload)
+    }
+
+    /// A socket on the file system is connected to by its path, not a TCP
+    /// connect: connect and close, and the far end reads an empty Stream.
+    fn unblock(&self, address: &str) {
+        #[cfg(unix)]
+        drop(std::os::unix::net::UnixStream::connect(target_path(
+            address,
+        )));
+        #[cfg(not(unix))]
+        let _ = address;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +276,57 @@ mod tests {
             "xmip-unix-{name}-{}-{nanos}.sock",
             std::process::id()
         ))
+    }
+
+    #[cfg(unix)]
+    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            ("empty", Vec::new()),
+            ("one byte", vec![0x2a]),
+            ("every byte", (0..=255).collect()),
+            ("nul run", vec![0; 512]),
+            ("high bytes", vec![0xff; 512]),
+            ("crlf storm", b"\r\n".repeat(400)),
+        ]
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_loopback_returns_the_edge_payloads_whole() {
+        let pair = UnixSocketTransport::loopback();
+        for (name, bytes) in edge_payloads() {
+            let arrived = pair
+                .round(&bytes)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(arrived.bytes, bytes, "{name}");
+            assert!(arrived.origin_uri.starts_with("unix:///"), "{name}");
+        }
+        assert!(pair.ceiling().is_none());
+        assert!(pair.refuses(b"\r\n\0").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn each_far_end_is_its_own_socket_and_goes_with_its_stream() {
+        let pair = UnixSocketTransport::loopback();
+        let first = pair.far_end().expect("the first socket");
+        let second = pair.far_end().expect("the second socket");
+        assert_ne!(first.address(), second.address());
+        let address = PathBuf::from(first.address());
+        pair.send_to(first.address(), b"once").expect("sending");
+        assert_eq!(first.take_one().expect("taking").bytes, b"once");
+        assert!(!address.exists(), "the socket file went with its Stream");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn a_loopback_on_a_system_without_the_object_refuses() {
+        let pair = UnixSocketTransport::loopback();
+        let error = pair.round(b"x").expect_err("no sockets here");
+        assert!(error.message.contains("Unix domain sockets"), "{error}");
+        assert!(pair.ceiling().is_none());
+        assert!(pair.refuses(b"x").is_none());
+        pair.unblock("nowhere");
     }
 
     #[test]
