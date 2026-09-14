@@ -267,6 +267,8 @@ impl Loopback for UnixSocketTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use transport::payload::edge_payloads;
 
     fn scratch(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -279,17 +281,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
-        vec![
-            ("empty", Vec::new()),
-            ("one byte", vec![0x2a]),
-            ("every byte", (0..=255).collect()),
-            ("nul run", vec![0; 512]),
-            ("high bytes", vec![0xff; 512]),
-            ("crlf storm", b"\r\n".repeat(400)),
-        ]
-    }
-
     #[cfg(unix)]
     #[test]
     fn the_loopback_returns_the_edge_payloads_whole() {
