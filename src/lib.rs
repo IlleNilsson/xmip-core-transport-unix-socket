@@ -27,6 +27,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use transport::error::{Result, TransportError};
+#[cfg(unix)]
+use transport::held::Held;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::{Arrived, Directions, Transport};
 
@@ -106,12 +108,10 @@ pub fn target_path(target: &str) -> &Path {
     Path::new(target.strip_prefix("unix://").unwrap_or(target))
 }
 
-/// `unix://` and the path, forward slashes throughout.
+/// `unix://` and the path as `net::uri` writes it.
 #[must_use]
 pub fn origin_of(path: &Path) -> String {
-    let text = path.display().to_string().replace(char::from(92), "/");
-    let text = text.strip_prefix('/').unwrap_or(&text).to_string();
-    format!("unix:///{text}")
+    format!("unix://{}", net::uri::path_of(path))
 }
 
 /// Why this build cannot speak the protocol at all, where it cannot.
@@ -194,30 +194,14 @@ fn fresh_path() -> PathBuf {
     ))
 }
 
-/// A bound socket waiting for its one connection; the file goes with it.
+/// A far end's socket file, which goes with the far end, taken or not.
 #[cfg(unix)]
-struct Bound {
-    transport: UnixSocketTransport,
-    listener: Listener,
-    address: String,
-}
+struct SocketFile(PathBuf);
 
 #[cfg(unix)]
-impl FarEnd for Bound {
-    fn address(&self) -> &str {
-        &self.address
-    }
-
-    fn take_one(self: Box<Self>) -> Result<Arrived> {
-        self.transport.accept_one(&self.listener)
-    }
-}
-
-/// The socket file goes with the far end, taken or not.
-#[cfg(unix)]
-impl Drop for Bound {
+impl Drop for SocketFile {
     fn drop(&mut self) {
-        std::fs::remove_file(self.transport.path()).ok();
+        std::fs::remove_file(&self.0).ok();
     }
 }
 
@@ -227,6 +211,8 @@ impl Loopback for UnixSocketTransport {
         unsupported().map(|error| error.message)
     }
 
+    /// A bound socket waiting for its one connection; the file goes with
+    /// it.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         #[cfg(unix)]
         {
@@ -234,11 +220,11 @@ impl Loopback for UnixSocketTransport {
             transport.path = fresh_path();
             let listener = transport.bind()?;
             let address = transport.path().display().to_string();
-            Ok(Box::new(Bound {
-                transport,
-                listener,
-                address,
-            }))
+            let file = SocketFile(transport.path().to_path_buf());
+            Ok(Box::new(Held::new(address, move || {
+                let _file = file;
+                transport.accept_one(&listener)
+            })))
         }
         #[cfg(not(unix))]
         {
