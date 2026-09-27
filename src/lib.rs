@@ -30,7 +30,8 @@ use transport::error::{Result, TransportError};
 #[cfg(unix)]
 use transport::held::Held;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::{Arrived, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Transport};
+use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
 /// The listening end, on a system that has one.
 #[cfg(unix)]
@@ -168,6 +169,30 @@ impl Transport for UnixSocketTransport {
             let _ = (target, bytes);
             Err(unsupported().unwrap_or_else(|| TransportError::permanent("unreachable")))
         }
+    }
+}
+
+impl Configured for UnixSocketTransport {
+    /// The address is the socket's path: where a Receive Location binds; a
+    /// Send Location's socket is each send's target.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[Setting {
+            name: "timeout",
+            kind: Kind::Duration,
+            presence: Presence::Optional,
+            meaning: "How long a connection is waited for and one that stops sending is \
+                      waited on; unbounded when left out.",
+            applies: Applies::Receive,
+        }],
+    };
+
+    fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
+        let transport = Self::new(address);
+        Ok(match settings.optional_duration("timeout") {
+            Some(timeout) => transport.timing_out_after(timeout),
+            None => transport,
+        })
     }
 }
 
@@ -316,6 +341,24 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use transport::payload::edge_payloads;
+    use xcore::settings::Given;
+
+    #[test]
+    fn unix_socket_declares_its_settings_and_reads_through_them() {
+        assert_eq!(
+            UnixSocketTransport::SETTINGS.problems(),
+            Vec::<String>::new()
+        );
+        let given = [("timeout".to_string(), Given::Text("2s".to_string()))];
+        let path = "/run/xmip/orders.sock";
+        let built = UnixSocketTransport::open(path, Applies::Receive, &given).expect("built");
+        assert_eq!(built.path(), Path::new(path));
+        assert_eq!(built.timeout, Some(Duration::from_secs(2)));
+        let Err(refused) = UnixSocketTransport::open(path, Applies::Send, &given) else {
+            panic!("a Send Location reads no timeout");
+        };
+        assert!(refused.message.contains("timeout"), "{}", refused.message);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
