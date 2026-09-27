@@ -29,6 +29,8 @@ use std::time::Duration;
 use transport::error::{Result, TransportError};
 #[cfg(unix)]
 use transport::held::Held;
+#[cfg(unix)]
+use transport::kept::Kept;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::{Arrived, Configured, Directions, Transport};
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
@@ -41,6 +43,9 @@ pub type Listener = std::os::unix::net::UnixListener;
 pub struct UnixSocketTransport {
     path: PathBuf,
     timeout: Option<Duration>,
+    /// The listener the first receive binds, and every receive takes from.
+    #[cfg(unix)]
+    receiving: Kept<Listener>,
 }
 
 impl UnixSocketTransport {
@@ -50,6 +55,8 @@ impl UnixSocketTransport {
         Self {
             path: path.into(),
             timeout: None,
+            #[cfg(unix)]
+            receiving: Kept::new(),
         }
     }
 
@@ -81,6 +88,12 @@ impl UnixSocketTransport {
         use transport::error::classify;
         std::fs::remove_file(&self.path).ok();
         Listener::bind(&self.path).map_err(|e| classify("binding the socket", &e))
+    }
+
+    /// The listener bound, and its path: what a Receive Location keeps.
+    #[cfg(unix)]
+    fn bound(&self) -> Result<(Listener, String)> {
+        Ok((self.bind()?, self.path.display().to_string()))
     }
 
     /// Take one connection from an already-bound listener, to its end.
@@ -134,12 +147,13 @@ impl Transport for UnixSocketTransport {
         Directions::BOTH
     }
 
-    /// Bind, and take one connection to its end.
+    /// Take one connection to its end, from the listener the first receive
+    /// bound and kept.
     fn receive(&self) -> Result<Vec<Arrived>> {
         #[cfg(unix)]
         {
-            let listener = self.bind()?;
-            Ok(vec![self.accept_one(&listener)?])
+            let listener = self.receiving.bound(|| self.bound())?;
+            Ok(vec![self.accept_one(listener)?])
         }
         #[cfg(not(unix))]
         {
@@ -293,6 +307,21 @@ mod tests {
             panic!("a Send Location reads no timeout");
         };
         assert!(refused.message.contains("timeout"), "{}", refused.message);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_receive_takes_from_the_listener_the_first_bound() {
+        let receiver = UnixSocketTransport::new(scratch("kept")).timing_out_after(LOOPBACK_TIMEOUT);
+        receiver
+            .receiving
+            .bound(|| receiver.bound())
+            .expect("bound");
+        let address = receiver.receiving.address().expect("address");
+        transport::kept::held_across_receives(&receiver, address, 5, |at, payload| {
+            UnixSocketTransport::new(at).send(at, payload)
+        });
+        std::fs::remove_file(receiver.path()).ok();
     }
 
     fn scratch(name: &str) -> PathBuf {
