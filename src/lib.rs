@@ -91,7 +91,8 @@ impl UnixSocketTransport {
     #[cfg(unix)]
     pub fn accept_one(&self, listener: &Listener) -> Result<Arrived> {
         use transport::error::classify;
-        let (mut stream, _) = accept_within(listener, self.timeout)?;
+        let (mut stream, _) =
+            transport::socket::accept_within(listener, self.timeout, "nothing connected")?;
         stream
             .set_read_timeout(self.timeout)
             .map_err(|e| classify("setting the read timeout", &e))?;
@@ -268,69 +269,6 @@ impl Loopback for UnixSocketTransport {
         #[cfg(not(unix))]
         let _ = address;
     }
-}
-
-/// The listener's accept, bounded by `timeout`; `None` waits for as long as
-/// it takes, which is what a listening Receive Location does.
-///
-/// It waited for good until 2026-09-21: a far end whose near end never came
-/// waited forever, the defect that hung the Playground's gate six times over
-/// TCP and the same line here. Polled, because std has no accept with a
-/// deadline: non-blocking, `accept` answers `WouldBlock` while nobody is
-/// there. The listener and the stream are handed back blocking on every way
-/// out, because the read after this expects a blocking stream.
-#[cfg(unix)]
-fn accept_within(
-    listener: &Listener,
-    timeout: Option<Duration>,
-) -> Result<(
-    std::os::unix::net::UnixStream,
-    std::os::unix::net::SocketAddr,
-)> {
-    use std::io::ErrorKind;
-    use std::time::Instant;
-    use transport::error::classify;
-
-    let Some(timeout) = timeout else {
-        return listener
-            // bounded: the None arm: a listening socket waits as long as it runs
-            .accept()
-            .map_err(|e| classify("accepting a connection", &e));
-    };
-
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| classify("waiting for a connection", &e))?;
-
-    let deadline = Instant::now() + timeout;
-    let accepted = loop {
-        // bounded: polled non-blocking, inside the deadline above
-        match listener.accept() {
-            Ok(pair) => break Ok(pair),
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
-                    break Err(TransportError::retryable(format!(
-                        "nothing connected within {} ms",
-                        timeout.as_millis()
-                    ))
-                    .at("accepting a connection"));
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            Err(error) => break Err(classify("accepting a connection", &error)),
-        }
-    };
-
-    listener
-        .set_nonblocking(false)
-        .map_err(|e| classify("waiting for a connection", &e))?;
-
-    let (stream, peer) = accepted?;
-    stream
-        .set_nonblocking(false)
-        .map_err(|e| classify("settling the accepted connection", &e))?;
-
-    Ok((stream, peer))
 }
 
 #[cfg(test)]
