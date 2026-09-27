@@ -86,19 +86,16 @@ impl UnixSocketTransport {
     /// Take one connection from an already-bound listener, to its end.
     ///
     /// # Errors
-    /// Where the connection could not be accepted or read to its end.
+    /// Where the connection could not be accepted or read to its end, or
+    /// carried more than `net::MAX_BODY`.
     #[cfg(unix)]
     pub fn accept_one(&self, listener: &Listener) -> Result<Arrived> {
-        use std::io::Read;
         use transport::error::classify;
         let (mut stream, _) = accept_within(listener, self.timeout)?;
         stream
             .set_read_timeout(self.timeout)
             .map_err(|e| classify("setting the read timeout", &e))?;
-        let mut bytes = Vec::new();
-        stream
-            .read_to_end(&mut bytes)
-            .map_err(|e| classify("reading the connection", &e))?;
+        let bytes = net::read::to_end(&mut stream, net::MAX_BODY)?;
         Ok(Arrived::new(self.origin(), bytes))
     }
 }
