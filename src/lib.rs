@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use net::Target;
 use transport::error::{Result, TransportError};
 #[cfg(unix)]
 use transport::held::Held;
@@ -117,7 +118,7 @@ impl UnixSocketTransport {
 /// The path a target names: `unix://` and a path, or the path itself.
 #[must_use]
 pub fn target_path(target: &str) -> &Path {
-    Path::new(target.strip_prefix("unix://").unwrap_or(target))
+    Path::new(Target::under(&["unix"], target).map_or(target, |named| named.after_scheme()))
 }
 
 /// `unix://` and the path as `net::uri` writes it.
