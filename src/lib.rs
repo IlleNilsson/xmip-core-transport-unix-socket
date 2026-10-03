@@ -21,6 +21,11 @@
 //!
 //! The origin URI is the bound path: `unix:///run/xmip/orders.sock`. A
 //! send target is a path, or `unix://` and a path.
+//!
+//! **Acceptance is at-most-once here** ([`AT_MOST_ONCE`]): the connection
+//! frames the Stream, closed to end it, and there is no reply on it, so the
+//! sender's write completed when the kernel took the bytes. The body is the
+//! connection, read to its end as the runtime asks.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -35,6 +40,12 @@ use transport::kept::Kept;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::{Arrived, Configured, Directions, Transport};
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
+
+/// Why an arrival on a Unix domain socket cannot be acknowledged after the
+/// receive cycle.
+pub const AT_MOST_ONCE: &str = "a Unix domain socket connection has no reply: the sender's \
+                                write completed when the kernel took the bytes, and closing \
+                                the connection ends the Stream";
 
 /// The listening end, on a system that has one.
 #[cfg(unix)]
@@ -97,21 +108,25 @@ impl UnixSocketTransport {
         Ok((self.bind()?, self.path.display().to_string()))
     }
 
-    /// Take one connection from an already-bound listener, to its end.
+    /// Take one connection from an already-bound listener. Its body is the
+    /// connection, read to its end as the runtime asks; acceptance is
+    /// at-most-once ([`AT_MOST_ONCE`]).
     ///
     /// # Errors
-    /// Where the connection could not be accepted or read to its end, or
-    /// carried more than `net::MAX_BODY`.
+    /// Where the connection could not be accepted.
     #[cfg(unix)]
     pub fn accept_one(&self, listener: &Listener) -> Result<Arrived> {
         use transport::error::classify;
-        let (mut stream, _) =
+        let (stream, _) =
             transport::socket::accept_within(listener, self.timeout, "nothing connected")?;
         stream
             .set_read_timeout(self.timeout)
             .map_err(|e| classify("setting the read timeout", &e))?;
-        let bytes = net::read::to_end(&mut stream, net::MAX_BODY)?;
-        Ok(Arrived::new(self.origin(), bytes))
+        Ok(Arrived::new(
+            self.origin(),
+            stream,
+            transport::Acknowledgement::at_most_once(AT_MOST_ONCE),
+        ))
     }
 }
 
@@ -148,8 +163,13 @@ impl Transport for UnixSocketTransport {
         Directions::BOTH
     }
 
-    /// Take one connection to its end, from the listener the first receive
-    /// bound and kept.
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Unordered("each connection is a Stream of its own")
+    }
+
+    /// Take one connection, from the listener the first receive bound and
+    /// kept, read to its end by the runtime. Acceptance is at-most-once
+    /// here: the connection has no reply to defer ([`AT_MOST_ONCE`]).
     fn receive(&self) -> Result<Vec<Arrived>> {
         #[cfg(unix)]
         {
@@ -261,7 +281,7 @@ impl Loopback for UnixSocketTransport {
             let file = SocketFile(transport.path().to_path_buf());
             Ok(Box::new(Held::new(address, move || {
                 let _file = file;
-                transport.accept_one(&listener)
+                transport.accept_one(&listener)?.taken()
             })))
         }
         #[cfg(not(unix))]
@@ -335,7 +355,6 @@ mod tests {
         ))
     }
 
-    #[cfg(unix)]
     #[cfg(unix)]
     #[test]
     fn the_loopback_returns_the_edge_payloads_whole() {
@@ -414,6 +433,8 @@ mod tests {
             UnixSocketTransport::new("/nowhere").send(&target, b"over a socket\0\xff")
         });
         let arrived = far_end.accept_one(&listener).expect("accepting");
+        assert!(!arrived.defers(), "a socket connection is at-most-once");
+        let arrived = arrived.taken().expect("read to its end");
         sender.join().expect("thread").expect("sending");
         assert_eq!(arrived.bytes, b"over a socket\0\xff");
         assert_eq!(arrived.origin_uri, far_end.origin());
