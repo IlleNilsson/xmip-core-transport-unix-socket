@@ -31,7 +31,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use context::property::{UNIX_PEER_GID, UNIX_PEER_PID, UNIX_PEER_UID};
 use net::Target;
+use transport::ArrivalIdentity;
 use transport::error::{Result, TransportError};
 #[cfg(unix)]
 use transport::held::Held;
@@ -122,12 +124,48 @@ impl UnixSocketTransport {
         stream
             .set_read_timeout(self.timeout)
             .map_err(|e| classify("setting the read timeout", &e))?;
+        let credentials = peer_credentials(&stream);
         Ok(Arrived::new(
             self.origin(),
             stream,
             transport::Acknowledgement::at_most_once(AT_MOST_ONCE),
-        ))
+        )
+        .observing_all(credentials))
     }
+}
+
+/// The connecting process's credentials, as the kernel reports them
+/// (`SO_PEERCRED`): its user, group and process ids under
+/// `context::property`'s names. None where the system says none, or the
+/// query failed: the arrival then names no more than its path.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_credentials(stream: &std::os::unix::net::UnixStream) -> Vec<(String, String)> {
+    use context::property::{UNIX_PEER_GID, UNIX_PEER_PID, UNIX_PEER_UID};
+    rustix::net::sockopt::socket_peercred(stream).map_or_else(
+        |_| Vec::new(),
+        |credentials| {
+            vec![
+                (
+                    UNIX_PEER_UID.to_string(),
+                    credentials.uid.as_raw().to_string(),
+                ),
+                (
+                    UNIX_PEER_GID.to_string(),
+                    credentials.gid.as_raw().to_string(),
+                ),
+                (
+                    UNIX_PEER_PID.to_string(),
+                    credentials.pid.as_raw_nonzero().to_string(),
+                ),
+            ]
+        },
+    )
+}
+
+/// No credentials where the kernel keeps no `ucred`.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+fn peer_credentials(_: &std::os::unix::net::UnixStream) -> Vec<(String, String)> {
+    Vec::new()
 }
 
 /// The path a target names: `unix://` and a path, or the path itself.
@@ -264,6 +302,14 @@ impl Drop for SocketFile {
 }
 
 impl Loopback for UnixSocketTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        if cfg!(any(target_os = "linux", target_os = "android")) {
+            ArrivalIdentity::Named(&[UNIX_PEER_UID, UNIX_PEER_GID, UNIX_PEER_PID])
+        } else {
+            ArrivalIdentity::Unnamed("this system keeps no ucred: a peer is named by its path")
+        }
+    }
+
     /// Where the OS has no Unix sockets, neither end can stand.
     fn unavailable(&self) -> Option<String> {
         unsupported().map(|error| error.message)
