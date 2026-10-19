@@ -212,7 +212,7 @@ impl Transport for UnixSocketTransport {
     /// Take one connection, from the listener the first receive bound and
     /// kept, read to its end by the runtime. Acceptance is at-most-once
     /// here: the connection has no reply to defer ([`AT_MOST_ONCE`]).
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         #[cfg(unix)]
         {
             let listener = self.receiving.bound(|| self.bound())?;
@@ -224,24 +224,27 @@ impl Transport for UnixSocketTransport {
         }
     }
 
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Streamed("the connection carries the body as it is read")
+    }
+
     /// Connect to the socket the target names, write the bytes, close.
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
         #[cfg(unix)]
         {
             use std::io::Write;
             use transport::error::classify;
             let mut stream = std::os::unix::net::UnixStream::connect(target_path(target))
                 .map_err(|e| classify("connecting to the socket", &e))?;
-            stream
-                .write_all(bytes)
-                .map_err(|e| classify("writing to the socket", &e))?;
+            // Written as it is read from the Ledger, never whole here.
+            outgoing.write_to(&mut stream)?;
             stream
                 .flush()
                 .map_err(|e| classify("flushing to the socket", &e))
         }
         #[cfg(not(unix))]
         {
-            let _ = (target, bytes);
+            let _ = (target, outgoing);
             Err(unsupported().unwrap_or_else(|| TransportError::permanent("unreachable")))
         }
     }
