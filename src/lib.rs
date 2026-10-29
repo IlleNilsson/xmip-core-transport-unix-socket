@@ -171,7 +171,8 @@ fn peer_credentials(_: &std::os::unix::net::UnixStream) -> Vec<(String, String)>
 /// The path a target names: `unix://` and a path, or the path itself.
 #[must_use]
 pub fn target_path(target: &str) -> &Path {
-    Path::new(Target::under(&["unix"], target).map_or(target, |named| named.after_scheme()))
+    let named = Target::under(<UnixSocketTransport as Configured>::SCHEMES, target);
+    Path::new(named.map_or(target, |named| named.after_scheme()))
 }
 
 /// `unix://` and the path as `net::uri` writes it.
@@ -264,6 +265,9 @@ impl Configured for UnixSocketTransport {
             applies: Applies::Receive,
         }],
     };
+
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["unix"];
 
     fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
         let transport = Self::new(address);
