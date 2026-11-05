@@ -512,7 +512,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_accept_nobody_answers_gives_up_within_its_timeout() {
-        // The defect this asserts hung the Playground's gate: a far end whose
+        // The defect this asserts hung the Essentials' gate: a far end whose
         // near end never came waited for good (2026-09-21).
         let path = scratch("unanswered");
         let transport =
