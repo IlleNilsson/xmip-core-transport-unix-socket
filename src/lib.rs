@@ -134,38 +134,42 @@ impl UnixSocketTransport {
     }
 }
 
-/// The connecting process's credentials, as the kernel reports them
-/// (`SO_PEERCRED`): its user, group and process ids under
-/// `context::property`'s names. None where the system says none, or the
-/// query failed: the arrival then names no more than its path.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn peer_credentials(stream: &std::os::unix::net::UnixStream) -> Vec<(String, String)> {
-    use context::property::{UNIX_PEER_GID, UNIX_PEER_PID, UNIX_PEER_UID};
-    rustix::net::sockopt::socket_peercred(stream).map_or_else(
-        |_| Vec::new(),
-        |credentials| {
-            vec![
-                (
-                    UNIX_PEER_UID.to_string(),
-                    credentials.uid.as_raw().to_string(),
-                ),
-                (
-                    UNIX_PEER_GID.to_string(),
-                    credentials.gid.as_raw().to_string(),
-                ),
-                (
-                    UNIX_PEER_PID.to_string(),
-                    credentials.pid.as_raw_nonzero().to_string(),
-                ),
-            ]
-        },
-    )
-}
-
-/// No credentials where the kernel keeps no `ucred`.
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
-fn peer_credentials(_: &std::os::unix::net::UnixStream) -> Vec<(String, String)> {
-    Vec::new()
+cfg_select! {
+    any(target_os = "linux", target_os = "android") => {
+        /// The connecting process's credentials, as the kernel reports them
+        /// (`SO_PEERCRED`): its user, group and process ids under
+        /// `context::property`'s names. None where the system says none, or
+        /// the query failed: the arrival then names no more than its path.
+        fn peer_credentials(stream: &std::os::unix::net::UnixStream) -> Vec<(String, String)> {
+            use context::property::{UNIX_PEER_GID, UNIX_PEER_PID, UNIX_PEER_UID};
+            rustix::net::sockopt::socket_peercred(stream).map_or_else(
+                |_| Vec::new(),
+                |credentials| {
+                    vec![
+                        (
+                            UNIX_PEER_UID.to_string(),
+                            credentials.uid.as_raw().to_string(),
+                        ),
+                        (
+                            UNIX_PEER_GID.to_string(),
+                            credentials.gid.as_raw().to_string(),
+                        ),
+                        (
+                            UNIX_PEER_PID.to_string(),
+                            credentials.pid.as_raw_nonzero().to_string(),
+                        ),
+                    ]
+                },
+            )
+        }
+    }
+    unix => {
+        /// No credentials where the kernel keeps no `ucred`.
+        fn peer_credentials(_: &std::os::unix::net::UnixStream) -> Vec<(String, String)> {
+            Vec::new()
+        }
+    }
+    _ => {}
 }
 
 /// The path a target names: `unix://` and a path, or the path itself.
@@ -214,14 +218,12 @@ impl Transport for UnixSocketTransport {
     /// kept, read to its end by the runtime. Acceptance is at-most-once
     /// here: the connection has no reply to defer ([`AT_MOST_ONCE`]).
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
-        #[cfg(unix)]
-        {
-            let listener = self.receiving.bound(|| self.bound())?;
-            Ok(vec![self.accept_one(listener)?])
-        }
-        #[cfg(not(unix))]
-        {
-            Err(unsupported().unwrap_or_else(|| TransportError::permanent("unreachable")))
+        cfg_select! {
+            unix => {
+                let listener = self.receiving.bound(|| self.bound())?;
+                Ok(vec![self.accept_one(listener)?])
+            }
+            _ => Err(unsupported().unwrap_or_else(|| TransportError::permanent("unreachable"))),
         }
     }
 
@@ -231,22 +233,22 @@ impl Transport for UnixSocketTransport {
 
     /// Connect to the socket the target names, write the bytes, close.
     fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use transport::error::classify;
-            let mut stream = std::os::unix::net::UnixStream::connect(target_path(target))
-                .map_err(|e| classify("connecting to the socket", &e))?;
-            // Written as it is read from the Ledger, never whole here.
-            outgoing.write_to(&mut stream)?;
-            stream
-                .flush()
-                .map_err(|e| classify("flushing to the socket", &e))
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (target, outgoing);
-            Err(unsupported().unwrap_or_else(|| TransportError::permanent("unreachable")))
+        cfg_select! {
+            unix => {
+                use std::io::Write;
+                use transport::error::classify;
+                let mut stream = std::os::unix::net::UnixStream::connect(target_path(target))
+                    .map_err(|e| classify("connecting to the socket", &e))?;
+                // Written as it is read from the Ledger, never whole here.
+                outgoing.write_to(&mut stream)?;
+                stream
+                    .flush()
+                    .map_err(|e| classify("flushing to the socket", &e))
+            }
+            _ => {
+                let _ = (target, outgoing);
+                Err(unsupported().unwrap_or_else(|| TransportError::permanent("unreachable")))
+            }
         }
     }
 }
@@ -329,21 +331,19 @@ impl Loopback for UnixSocketTransport {
     /// A bound socket waiting for its one connection; the file goes with
     /// it.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        #[cfg(unix)]
-        {
-            let mut transport = self.clone();
-            transport.path = fresh_path();
-            let listener = transport.bind()?;
-            let address = transport.path().display().to_string();
-            let file = SocketFile(transport.path().to_path_buf());
-            Ok(Box::new(Held::new(address, move || {
-                let _file = file;
-                transport.accept_one(&listener)?.taken()
-            })))
-        }
-        #[cfg(not(unix))]
-        {
-            Err(unsupported().unwrap_or_else(|| TransportError::permanent("unreachable")))
+        cfg_select! {
+            unix => {
+                let mut transport = self.clone();
+                transport.path = fresh_path();
+                let listener = transport.bind()?;
+                let address = transport.path().display().to_string();
+                let file = SocketFile(transport.path().to_path_buf());
+                Ok(Box::new(Held::new(address, move || {
+                    let _file = file;
+                    transport.accept_one(&listener)?.taken()
+                })))
+            }
+            _ => Err(unsupported().unwrap_or_else(|| TransportError::permanent("unreachable"))),
         }
     }
 
@@ -354,12 +354,14 @@ impl Loopback for UnixSocketTransport {
     /// A socket on the file system is connected to by its path, not a TCP
     /// connect: connect and close, and the far end reads an empty Stream.
     fn unblock(&self, address: &str) {
-        #[cfg(unix)]
-        drop(std::os::unix::net::UnixStream::connect(target_path(
-            address,
-        )));
-        #[cfg(not(unix))]
-        let _ = address;
+        cfg_select! {
+            unix => {
+                drop(std::os::unix::net::UnixStream::connect(target_path(address)));
+            }
+            _ => {
+                let _ = address;
+            }
+        }
     }
 }
 
