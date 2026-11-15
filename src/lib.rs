@@ -41,7 +41,7 @@ use transport::held::Held;
 use transport::kept::Kept;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::{Arrived, Configured, Directions, Transport};
-use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
+use xcore::settings::{Applies, Settings};
 
 /// Why an arrival on a Unix domain socket cannot be acknowledged after the
 /// receive cycle.
@@ -72,13 +72,6 @@ impl UnixSocketTransport {
             #[cfg(unix)]
             receiving: Kept::new(),
         }
-    }
-
-    /// Give up on a connection that stops sending.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
     }
 
     /// Where the socket is.
@@ -258,25 +251,23 @@ impl Configured for UnixSocketTransport {
     /// Send Location's socket is each send's target.
     const SETTINGS: &'static Settings = &Settings {
         technology: env!("CARGO_PKG_NAME"),
-        settings: &[Setting {
-            name: "timeout",
-            kind: Kind::Duration,
-            presence: Presence::Optional,
-            meaning: "How long a connection is waited for and one that stops sending is \
-                      waited on; unbounded when left out.",
-            applies: Applies::Receive,
-        }],
+        settings: &[transport::configured::timeout(
+            Applies::Receive,
+            None,
+            "How long a connection is waited for and one that stops sending is \
+             waited on; unbounded when left out.",
+        )],
     };
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["unix"];
 
-    fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
-        let transport = Self::new(address);
-        Ok(match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
-        })
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
+
+    fn configured(address: &str, _settings: &xcore::settings::Read) -> Result<Self> {
+        Ok(Self::new(address))
     }
 }
 
