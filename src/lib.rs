@@ -57,7 +57,8 @@ pub type Listener = std::os::unix::net::UnixListener;
 pub struct UnixSocketTransport {
     path: PathBuf,
     timeout: Option<Duration>,
-    /// The listener the first receive binds, and every receive takes from.
+    /// The listener bound as a Receive Location's transport is opened
+    /// (`Configured::listening`), and every receive takes from.
     #[cfg(unix)]
     receiving: Kept<Listener>,
 }
@@ -207,13 +208,13 @@ impl Transport for UnixSocketTransport {
         transport::Waiting::Waits("the accept waits for a connection")
     }
 
-    /// Take one connection, from the listener the first receive bound and
+    /// Take one connection, from the listener its open bound and
     /// kept, read to its end by the runtime. Acceptance is at-most-once
     /// here: the connection has no reply to defer ([`AT_MOST_ONCE`]).
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         cfg_select! {
             unix => {
-                let listener = self.receiving.bound(|| self.bound())?;
+                let listener = self.receiving.listener()?;
                 Ok(vec![self.accept_one(listener)?])
             }
             _ => Err(unsupported().unwrap_or_else(|| TransportError::permanent("unreachable"))),
@@ -268,6 +269,16 @@ impl Configured for UnixSocketTransport {
 
     fn configured(address: &str, _settings: &xcore::settings::Read) -> Result<Self> {
         Ok(Self::new(address))
+    }
+
+    /// The listener every receive takes from, bound at the path a Receive
+    /// Location names; refused where the system has no Unix domain sockets
+    /// ([`unsupported`]), as its receive would be.
+    fn listening(&self) -> Result<Option<&str>> {
+        cfg_select! {
+            unix => self.receiving.listening(|| self.bound()),
+            _ => Err(unsupported().unwrap_or_else(|| TransportError::permanent("unreachable"))),
+        }
     }
 }
 
