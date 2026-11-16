@@ -4,7 +4,7 @@ Unix domain socket transport: one connection to a socket on the file system is o
 
 A Receive Location's accept is bounded through the capability's one bounded accept (`transport::socket::accept_within`), which waits on the socket's readiness and takes a connection as it lands; until 2026-09-27 this crate carried its own copy, polling with a two-millisecond nap.
 
-A Receive Location keeps its listener, bound on the first receive and kept (`transport::kept::Kept`): a peer that connects between two receives is queued and taken by the next, where until 2026-09-27 each receive bound the socket anew and a peer between receives was refused.
+A Receive Location keeps its listener, bound as its transport is opened (`Configured::listening`; on its first receive until 2026-11-16) and kept (`transport::kept::Kept`): a peer that connects between two receives is queued and taken by the next, where until 2026-09-27 each receive bound the socket anew and a peer between receives was refused. On a system without Unix domain sockets a Receive Location is refused as the node starts, at phase 9, as its receive would be.
 
 A send target is read by `net::Target` in [xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net), the one reading of a URI every technology calls. Until 2026-09-28 this technology stripped its scheme by hand.
 
