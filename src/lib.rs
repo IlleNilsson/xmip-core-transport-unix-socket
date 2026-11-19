@@ -15,9 +15,12 @@
 //! Windows has had `AF_UNIX` since 2018 and the Rust standard library does
 //! not reach it, so on Windows this transport refuses every send and
 //! receive with a permanent error rather than pretend: proven where the
-//! operating system has the object, refusing elsewhere. The socket file is
-//! removed when a Receive Location binds it, because a path the last run
-//! left behind is what `bind` fails on.
+//! operating system has the object, refusing elsewhere. A Receive
+//! Location's path is claimed before its socket is bound
+//! (`net::socket_file`; ADR-0018, amendment 2026-11-19): a socket a
+//! stopped listener left is replaced; another listener holding the path,
+//! a socket something answers on, or a file of another kind, which is
+//! kept, refuses the Location; and only its own socket file goes with it.
 //!
 //! The origin URI is the bound path: `unix:///run/xmip/orders.sock`. A
 //! send target is a path, or `unix://` and a path.
@@ -33,6 +36,8 @@ use std::time::Duration;
 
 use context::property::{UNIX_PEER_GID, UNIX_PEER_PID, UNIX_PEER_UID};
 use net::Target;
+#[cfg(unix)]
+use net::socket_file::SocketFile;
 use transport::ArrivalIdentity;
 use transport::error::{Result, TransportError};
 #[cfg(unix)]
@@ -49,18 +54,14 @@ pub const AT_MOST_ONCE: &str = "a Unix domain socket connection has no reply: th
                                 write completed when the kernel took the bytes, and closing \
                                 the connection ends the Stream";
 
-/// The listening end, on a system that has one.
-#[cfg(unix)]
-pub type Listener = std::os::unix::net::UnixListener;
-
 #[derive(Clone)]
 pub struct UnixSocketTransport {
     path: PathBuf,
     timeout: Option<Duration>,
-    /// The listener bound as a Receive Location's transport is opened
+    /// The socket bound as a Receive Location's transport is opened
     /// (`Configured::listening`), and every receive takes from.
     #[cfg(unix)]
-    receiving: Kept<Listener>,
+    receiving: Kept<SocketFile>,
 }
 
 impl UnixSocketTransport {
@@ -87,34 +88,36 @@ impl UnixSocketTransport {
         origin_of(&self.path)
     }
 
-    /// Bind the socket, removing a file a previous run left at the path.
+    /// Bind the socket on its path, claimed first (`net::socket_file`): a
+    /// socket a stopped listener left is replaced.
     ///
     /// # Errors
-    /// Where the path is not permitted or its directory is missing.
+    /// Where another listener holds the path, something answers on a
+    /// socket there, or a file of another kind is there, which is kept;
+    /// where the path is not permitted or its directory is missing.
     #[cfg(unix)]
-    pub fn bind(&self) -> Result<Listener> {
+    pub fn bind(&self) -> Result<SocketFile> {
         use transport::error::classify;
-        std::fs::remove_file(&self.path).ok();
-        Listener::bind(&self.path).map_err(|e| classify("binding the socket", &e))
+        SocketFile::bind(&self.path).map_err(|e| classify("binding the socket", &e))
     }
 
-    /// The listener bound, and its path: what a Receive Location keeps.
+    /// The socket bound, and its path: what a Receive Location keeps.
     #[cfg(unix)]
-    fn bound(&self) -> Result<(Listener, String)> {
+    fn bound(&self) -> Result<(SocketFile, String)> {
         Ok((self.bind()?, self.path.display().to_string()))
     }
 
-    /// Take one connection from an already-bound listener. Its body is the
+    /// Take one connection from an already-bound socket. Its body is the
     /// connection, read to its end as the runtime asks; acceptance is
     /// at-most-once ([`AT_MOST_ONCE`]).
     ///
     /// # Errors
     /// Where the connection could not be accepted.
     #[cfg(unix)]
-    pub fn accept_one(&self, listener: &Listener) -> Result<Arrived> {
+    pub fn accept_one(&self, socket: &SocketFile) -> Result<Arrived> {
         use transport::error::classify;
         let (stream, _) =
-            transport::socket::accept_within(listener, self.timeout, "nothing connected")?;
+            transport::socket::accept_within(socket.listener(), self.timeout, "nothing connected")?;
         stream
             .set_read_timeout(self.timeout)
             .map_err(|e| classify("setting the read timeout", &e))?;
@@ -305,17 +308,6 @@ fn fresh_path() -> PathBuf {
     ))
 }
 
-/// A far end's socket file, which goes with the far end, taken or not.
-#[cfg(unix)]
-struct SocketFile(PathBuf);
-
-#[cfg(unix)]
-impl Drop for SocketFile {
-    fn drop(&mut self) {
-        std::fs::remove_file(&self.0).ok();
-    }
-}
-
 impl Loopback for UnixSocketTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         if cfg!(any(target_os = "linux", target_os = "android")) {
@@ -330,19 +322,17 @@ impl Loopback for UnixSocketTransport {
         unsupported().map(|error| error.message)
     }
 
-    /// A bound socket waiting for its one connection; the file goes with
-    /// it.
+    /// A bound socket waiting for its one connection; its file goes with
+    /// it, taken or not.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         cfg_select! {
             unix => {
                 let mut transport = self.clone();
                 transport.path = fresh_path();
-                let listener = transport.bind()?;
+                let socket = transport.bind()?;
                 let address = transport.path().display().to_string();
-                let file = SocketFile(transport.path().to_path_buf());
                 Ok(Box::new(Held::new(address, move || {
-                    let _file = file;
-                    transport.accept_one(&listener)?.taken()
+                    transport.accept_one(&socket)?.taken()
                 })))
             }
             _ => Err(unsupported().unwrap_or_else(|| TransportError::permanent("unreachable"))),
@@ -394,7 +384,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn every_receive_takes_from_the_listener_the_first_bound() {
-        let receiver = UnixSocketTransport::new(scratch("kept")).timing_out_after(LOOPBACK_TIMEOUT);
+        let scratch = scratch("kept");
+        let receiver = UnixSocketTransport::new(scratch.path()).timing_out_after(LOOPBACK_TIMEOUT);
         receiver
             .receiving
             .bound(|| receiver.bound())
@@ -403,17 +394,35 @@ mod tests {
         transport::kept::held_across_receives(&receiver, address, 5, |at, payload| {
             UnixSocketTransport::new(at).send(at, payload)
         });
-        std::fs::remove_file(receiver.path()).ok();
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| since.as_nanos());
-        std::env::temp_dir().join(format!(
-            "xmip-unix-{name}-{}-{nanos}.sock",
-            std::process::id()
-        ))
+    /// A folder of a test's own, for its socket and the socket's lock,
+    /// which goes with everything in it when the test ends, also when it
+    /// fails.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        /// The socket's path in it.
+        fn path(&self) -> PathBuf {
+            self.0.join("in.sock")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
+        static COUNTER: AtomicU32 = AtomicU32::new(1);
+        let folder = std::env::temp_dir().join(format!(
+            "xmip-unix-{name}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&folder).expect("a folder");
+        Scratch(folder)
     }
 
     #[cfg(unix)]
@@ -486,7 +495,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_connection_is_one_stream_read_to_its_end() {
-        let path = scratch("stream");
+        let scratch = scratch("stream");
+        let path = scratch.path();
         let far_end = UnixSocketTransport::new(&path).timing_out_after(Duration::from_secs(2));
         let listener = far_end.bind().expect("binding");
         let target = format!("unix://{}", path.display());
@@ -499,13 +509,28 @@ mod tests {
         sender.join().expect("thread").expect("sending");
         assert_eq!(arrived.bytes, b"over a socket\0\xff");
         assert_eq!(arrived.origin_uri, far_end.origin());
-        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_location_over_an_ordinary_file_is_refused_at_open_and_the_file_kept() {
+        let scratch = scratch("ordinary");
+        let path = scratch.path();
+        std::fs::write(&path, b"kept").expect("an ordinary file");
+        let location =
+            UnixSocketTransport::open(&path.display().to_string(), Applies::Receive, &[])
+                .expect("built");
+        let refused = location.listening().expect_err("refused");
+        assert!(!refused.retryable, "{refused}");
+        assert!(refused.message.contains("an ordinary file"), "{refused}");
+        assert_eq!(std::fs::read(&path).expect("still there"), b"kept");
     }
 
     #[cfg(unix)]
     #[test]
     fn a_socket_nobody_listens_on_is_refused() {
-        let path = scratch("nobody");
+        let scratch = scratch("nobody");
+        let path = scratch.path();
         let error = UnixSocketTransport::new(&path)
             .send(&path.display().to_string(), b"x")
             .expect_err("nothing there");
@@ -518,7 +543,8 @@ mod tests {
     fn an_accept_nobody_answers_gives_up_within_its_timeout() {
         // The defect this asserts hung the Essentials' gate: a far end whose
         // near end never came waited for good (2026-09-21).
-        let path = scratch("unanswered");
+        let scratch = scratch("unanswered");
+        let path = scratch.path();
         let transport =
             UnixSocketTransport::new(&path).timing_out_after(Duration::from_millis(200));
         let listener = transport.bind().expect("the socket is bound");
@@ -541,7 +567,8 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn a_system_without_the_object_refuses_rather_than_pretends() {
-        let path = scratch("refused");
+        let scratch = scratch("refused");
+        let path = scratch.path();
         let socket = UnixSocketTransport::new(&path);
         let receive = socket.receive().expect_err("no sockets here");
         assert!(!receive.retryable, "{receive}");

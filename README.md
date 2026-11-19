@@ -6,6 +6,8 @@ A Receive Location's accept is bounded through the capability's one bounded acce
 
 A Receive Location keeps its listener, bound as its transport is opened (`Configured::listening`; on its first receive until 2026-11-16) and kept (`transport::kept::Kept`): a peer that connects between two receives is queued and taken by the next, where until 2026-09-27 each receive bound the socket anew and a peer between receives was refused. On a system without Unix domain sockets a Receive Location is refused as the node starts, at phase 9, as its receive would be.
 
+A Receive Location's socket and each loopback far end's are bound through `net::socket_file` in [xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net), the one claim of a path a listener binds (ADR-0018, amendment 2026-11-19): `<path>.lock` held while it listens, and removed with it; a socket a stopped listener left is replaced; another listener holding the path, a socket something answers on, or a file of another kind there, which is kept, refuses the Location at phase 9 naming the path; and only the listener's own socket file goes with it. Until 2026-11-19 this crate removed whatever was at its path before it bound — an ordinary file, or the socket of a listener still answering, which went on running unreachable — and removed its path as it went, whatever had taken its place.
+
 A send target is read by `net::Target` in [xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net), the one reading of a URI every technology calls. Until 2026-09-28 this technology stripped its scheme by hand.
 
 ## Acknowledgement
