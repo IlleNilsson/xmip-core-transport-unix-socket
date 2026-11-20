@@ -385,7 +385,8 @@ mod tests {
     #[test]
     fn every_receive_takes_from_the_listener_the_first_bound() {
         let scratch = scratch("kept");
-        let receiver = UnixSocketTransport::new(scratch.path()).timing_out_after(LOOPBACK_TIMEOUT);
+        let receiver =
+            UnixSocketTransport::new(scratch.join("in.sock")).timing_out_after(LOOPBACK_TIMEOUT);
         receiver
             .receiving
             .bound(|| receiver.bound())
@@ -396,33 +397,9 @@ mod tests {
         });
     }
 
-    /// A folder of a test's own, for its socket and the socket's lock,
-    /// which goes with everything in it when the test ends, also when it
-    /// fails.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        /// The socket's path in it.
-        fn path(&self) -> PathBuf {
-            self.0.join("in.sock")
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn scratch(name: &str) -> Scratch {
-        static COUNTER: AtomicU32 = AtomicU32::new(1);
-        let folder = std::env::temp_dir().join(format!(
-            "xmip-unix-{name}-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&folder).expect("a folder");
-        Scratch(folder)
+    /// A folder of a test's own, for its socket and the socket's lock.
+    fn scratch(name: &str) -> file::temporary::Folder {
+        file::temporary::Folder::new(&format!("unix-{name}"))
     }
 
     #[cfg(unix)]
@@ -496,7 +473,7 @@ mod tests {
     #[test]
     fn a_connection_is_one_stream_read_to_its_end() {
         let scratch = scratch("stream");
-        let path = scratch.path();
+        let path = scratch.join("in.sock");
         let far_end = UnixSocketTransport::new(&path).timing_out_after(Duration::from_secs(2));
         let listener = far_end.bind().expect("binding");
         let target = format!("unix://{}", path.display());
@@ -515,7 +492,7 @@ mod tests {
     #[test]
     fn a_location_over_an_ordinary_file_is_refused_at_open_and_the_file_kept() {
         let scratch = scratch("ordinary");
-        let path = scratch.path();
+        let path = scratch.join("in.sock");
         std::fs::write(&path, b"kept").expect("an ordinary file");
         let location =
             UnixSocketTransport::open(&path.display().to_string(), Applies::Receive, &[])
@@ -530,7 +507,7 @@ mod tests {
     #[test]
     fn a_socket_nobody_listens_on_is_refused() {
         let scratch = scratch("nobody");
-        let path = scratch.path();
+        let path = scratch.join("in.sock");
         let error = UnixSocketTransport::new(&path)
             .send(&path.display().to_string(), b"x")
             .expect_err("nothing there");
@@ -544,7 +521,7 @@ mod tests {
         // The defect this asserts hung the Essentials' gate: a far end whose
         // near end never came waited for good (2026-09-21).
         let scratch = scratch("unanswered");
-        let path = scratch.path();
+        let path = scratch.join("in.sock");
         let transport =
             UnixSocketTransport::new(&path).timing_out_after(Duration::from_millis(200));
         let listener = transport.bind().expect("the socket is bound");
@@ -568,7 +545,7 @@ mod tests {
     #[test]
     fn a_system_without_the_object_refuses_rather_than_pretends() {
         let scratch = scratch("refused");
-        let path = scratch.path();
+        let path = scratch.join("in.sock");
         let socket = UnixSocketTransport::new(&path);
         let receive = socket.receive().expect_err("no sockets here");
         assert!(!receive.retryable, "{receive}");
