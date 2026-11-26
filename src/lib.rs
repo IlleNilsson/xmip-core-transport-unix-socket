@@ -29,31 +29,50 @@
 //! frames the Stream, closed to end it, and there is no reply on it, so the
 //! sender's write completed when the kernel took the bytes. The body is the
 //! connection, read to its end as the runtime asks.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, on every
+//! operating system, and none of the code above, which is behind the
+//! default feature: what the surfaces' library carries (ADR-0064,
+//! amendment 2026-11-26).
 
+#[cfg(feature = "declaration")]
+pub mod declaration;
+
+#[cfg(feature = "default")]
 use std::path::{Path, PathBuf};
+#[cfg(feature = "default")]
 use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(feature = "default")]
 use std::time::Duration;
 
+#[cfg(feature = "default")]
 use context::property::{UNIX_PEER_GID, UNIX_PEER_PID, UNIX_PEER_UID};
+#[cfg(feature = "default")]
 use net::Target;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "default"))]
 use net::socket_file::SocketFile;
-use transport::ArrivalIdentity;
+#[cfg(feature = "default")]
 use transport::error::{Result, TransportError};
-#[cfg(unix)]
+#[cfg(all(unix, feature = "default"))]
 use transport::held::Held;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "default"))]
 use transport::kept::Kept;
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::{Arrived, Configured, Directions, Transport};
-use xcore::settings::{Applies, Settings};
+#[cfg(feature = "default")]
+use transport::{ArrivalIdentity, Arrived, Configured, Directions, Transport};
+#[cfg(feature = "default")]
+use xcore::settings::Settings;
 
 /// Why an arrival on a Unix domain socket cannot be acknowledged after the
 /// receive cycle.
+#[cfg(feature = "default")]
 pub const AT_MOST_ONCE: &str = "a Unix domain socket connection has no reply: the sender's \
                                 write completed when the kernel took the bytes, and closing \
                                 the connection ends the Stream";
 
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct UnixSocketTransport {
     path: PathBuf,
@@ -64,6 +83,7 @@ pub struct UnixSocketTransport {
     receiving: Kept<SocketFile>,
 }
 
+#[cfg(feature = "default")]
 impl UnixSocketTransport {
     /// The socket at `path`.
     #[must_use]
@@ -131,6 +151,7 @@ impl UnixSocketTransport {
     }
 }
 
+#[cfg(feature = "default")]
 cfg_select! {
     any(target_os = "linux", target_os = "android") => {
         /// The connecting process's credentials, as the kernel reports them
@@ -170,19 +191,22 @@ cfg_select! {
 }
 
 /// The path a target names: `unix://` and a path, or the path itself.
+#[cfg(feature = "default")]
 #[must_use]
 pub fn target_path(target: &str) -> &Path {
-    let named = Target::under(<UnixSocketTransport as Configured>::SCHEMES, target);
+    let named = Target::under(declaration::SCHEMES, target);
     Path::new(named.map_or(target, |named| named.after_scheme()))
 }
 
 /// `unix://` and the path as `net::uri` writes it.
+#[cfg(feature = "default")]
 #[must_use]
 pub fn origin_of(path: &Path) -> String {
     format!("unix://{}", net::uri::path_of(path))
 }
 
 /// Why this build cannot speak the protocol at all, where it cannot.
+#[cfg(feature = "default")]
 #[must_use]
 pub fn unsupported() -> Option<TransportError> {
     if cfg!(unix) {
@@ -194,6 +218,7 @@ pub fn unsupported() -> Option<TransportError> {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for UnixSocketTransport {
     fn name(&self) -> &'static str {
         "unix-socket"
@@ -250,21 +275,10 @@ impl Transport for UnixSocketTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for UnixSocketTransport {
-    /// The address is the socket's path: where a Receive Location binds; a
-    /// Send Location's socket is each send's target.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[transport::configured::timeout(
-            Applies::Receive,
-            None,
-            "How long a connection is waited for and one that stops sending is \
-             waited on; unbounded when left out.",
-        )],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["unix"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
         Some(&mut self.timeout)
@@ -285,6 +299,7 @@ impl Configured for UnixSocketTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl UnixSocketTransport {
     /// Both ends on this machine: a socket of this process's own in the
     /// temporary directory, the loopback timeout on the read. Each far end
@@ -299,6 +314,7 @@ impl UnixSocketTransport {
 
 /// A socket path no other far end of this process has: the socket is the
 /// address, so two rounds at once need two sockets.
+#[cfg(feature = "default")]
 fn fresh_path() -> PathBuf {
     static COUNTER: AtomicU32 = AtomicU32::new(1);
     std::env::temp_dir().join(format!(
@@ -308,6 +324,7 @@ fn fresh_path() -> PathBuf {
     ))
 }
 
+#[cfg(feature = "default")]
 impl Loopback for UnixSocketTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         if cfg!(any(target_os = "linux", target_os = "android")) {
@@ -362,7 +379,7 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use transport::payload::edge_payloads;
-    use xcore::settings::Given;
+    use xcore::settings::{Applies, Given};
 
     #[test]
     fn unix_socket_declares_its_settings_and_reads_through_them() {
