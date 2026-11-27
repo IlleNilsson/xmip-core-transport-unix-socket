@@ -31,10 +31,7 @@
 //! connection, read to its end as the runtime asks.
 //!
 //! **Built with its `declaration` feature alone** the crate is
-//! [`declaration`], what a Location of it is configured with, on every
-//! operating system, and none of the code above, which is behind the
-//! default feature: what the surfaces' library carries (ADR-0064,
-//! amendment 2026-11-26).
+//! [`declaration`]. It is the same on every operating system.
 
 #[cfg(feature = "declaration")]
 pub mod declaration;
